@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Nhắn tin MQTT với Muse</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --panel2:#1e222c; --border:#2a2f3a;
+    --text:#e8eaee; --muted:#9aa3b2; --accent:#c93a2e; --me:#2563eb; --them:#262b36;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text);display:flex;flex-direction:column;height:100dvh}
+  header{padding:12px 14px;background:var(--panel);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px}
+  header .title{font-weight:700;font-size:16px;flex:1}
+  header .title small{display:block;font-weight:400;font-size:11px;color:var(--muted);margin-top:2px}
+  .dot{width:10px;height:10px;border-radius:50%;background:#666;flex:none}
+  .dot.on{background:#22c55e;box-shadow:0 0 8px #22c55e88}
+  .dot.busy{background:#eab308}
+  button{cursor:pointer;border:1px solid var(--border);background:var(--panel2);color:var(--text);border-radius:10px;padding:8px 12px;font-size:13px}
+  button:active{transform:scale(.97)}
+  details{background:var(--panel);border-bottom:1px solid var(--border);padding:8px 14px}
+  details summary{font-size:13px;color:var(--muted);cursor:pointer}
+  details .grid{margin-top:8px;font-size:12px;line-height:1.9;color:var(--muted);word-break:break-all}
+  details code{color:var(--text);background:var(--panel2);padding:1px 6px;border-radius:6px}
+  #chips{display:flex;gap:8px;padding:10px 12px 0;flex-wrap:wrap}
+  .chip{border-radius:999px;padding:7px 12px;font-size:13px}
+  .chip.sel{background:var(--accent);border-color:transparent;color:#fff}
+  #msgs{flex:1;overflow-y:auto;padding:14px 12px;display:flex;flex-direction:column;gap:8px}
+  .msg{max-width:82%;padding:9px 12px;border-radius:14px;font-size:15px;line-height:1.55;white-space:pre-wrap;word-break:break-word}
+  .msg .meta{font-size:10px;opacity:.65;margin-top:4px}
+  .me{align-self:flex-end;background:var(--me);color:#fff;border-bottom-right-radius:4px}
+  .them{align-self:flex-start;background:var(--them);border-bottom-left-radius:4px;border:1px solid #39424f}
+  .sys{align-self:center;background:transparent;color:var(--muted);font-size:12.5px;text-align:center;max-width:95%;line-height:1.7}
+  #bar{display:flex;gap:8px;padding:10px 12px calc(10px + env(safe-area-inset-bottom));background:var(--panel);border-top:1px solid var(--border)}
+  #inp{flex:1;background:var(--panel2);border:1px solid var(--border);color:var(--text);border-radius:12px;padding:11px 12px;font-size:15px;outline:none}
+  #send{background:var(--accent);border-color:transparent;color:#fff;font-weight:700;padding:0 20px;border-radius:12px;font-size:15px}
+  #send:disabled{opacity:.45}
+  .empty{color:var(--muted);text-align:center;margin-top:40px;font-size:14px;line-height:1.8;padding:0 30px}
+</style>
+</head>
+<body>
+<header>
+  <div class="dot" id="dot"></div>
+  <div class="title">Nhắn tin MQTT với Muse<small id="status">Đang khởi động…</small></div>
+  <button id="clear">🗑 Xoá lịch sử</button>
+  <button id="reconnect">↻ Kết nối lại</button>
+</header>
+
+<details>
+  <summary>⚙️ Thông số kết nối (đã cấu hình sẵn)</summary>
+  <div class="grid">
+    Broker: <code>broker.emqx.io</code> (app tự thử 2 đường kết nối)<br>
+    Topic bạn gửi: <code id="tSend"></code><br>
+    Topic nhận phản hồi từ Muse: <code id="tReply"></code><br>
+    Cấu trúc tin: <code>[PHAN] loại | nội dung</code> — chọn loại tin ở hàng nút phía dưới ô chat.<br>
+    💡 Phản hồi của Muse sẽ hiện ở phía trái. Nếu Muse trả lời lúc bạn đang tắt app, tin vẫn được broker giữ và tự hiện khi bạn mở lại.
+  </div>
+</details>
+
+<div id="chips">
+  <button class="chip sel" data-tag="chat">💬 Chat thường</button>
+  <button class="chip" data-tag="note">📌 Ghi chú</button>
+  <button class="chip" data-tag="hoi">❓ Hỏi Muse</button>
+  <button class="chip" data-tag="nhac">⏰ Nhắc việc</button>
+  <button class="chip" data-tag="viec">✅ Việc cần làm</button>
+</div>
+
+<div id="msgs">
+  <div class="empty" id="emptyHint">Gửi tin nhắn ở đây — Muse sẽ nhận được qua MQTT<br>và trả lời ngay trong app này 🌍</div>
+</div>
+
+<div id="bar">
+  <input id="inp" type="text" placeholder="Nhập tin nhắn…" autocomplete="off" enterkeyhint="send">
+  <button id="send" disabled>Gửi</button>
+</div>
+
+<script>
+function setStatus(on, text, busy){
+  var d = document.getElementById('dot');
+  d.className = 'dot' + (on ? ' on' : busy ? ' busy' : '');
+  document.getElementById('status').textContent = text;
+  document.getElementById('send').disabled = !on;
+}
+function loadMqtt(srcs, done){
+  if(!srcs.length){ done(false); return; }
+  var s=document.createElement('script');
+  s.src=srcs[0];
+  s.onload=function(){ done(true); };
+  s.onerror=function(){ loadMqtt(srcs.slice(1), done); };
+  document.head.appendChild(s);
+}
+loadMqtt([
+  'https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js',
+  'https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js'
+], function(ok){
+  if(!ok){ setStatus(false, 'Không tải được thư viện MQTT — kiểm tra mạng rồi tải lại trang'); return; }
+  startApp();
+});
+
+function startApp(){
+var CFG = {
+  endpoints: [
+    'wss://broker.emqx.io:8084/mqtt',
+    'ws://broker.emqx.io:8083/mqtt'
+  ],
+  topicSend: 'phan-muse/cro01l9hkpve/msg',
+  topicReply: 'phan-muse/cro01l9hkpve/reply'
+};
+document.getElementById('tSend').textContent = CFG.topicSend;
+document.getElementById('tReply').textContent = CFG.topicReply;
+
+var client = null, connected = false, tag = 'chat', epIdx = 0, timer = null, gaveTips = false, unread = 0;
+var msgsEl = document.getElementById('msgs');
+var inp = document.getElementById('inp');
+var sendBtn = document.getElementById('send');
+var BASE_TITLE = document.title;
+
+/* Mã định danh cố định cho thiết bị này: broker nhớ phiên kết nối,
+   giữ lại phản hồi gửi tới trong lúc app đang tắt. */
+var clientId = localStorage.getItem('mqttClientId');
+if(!clientId){
+  clientId = 'phan-phone-' + Math.random().toString(36).slice(2, 12);
+  localStorage.setItem('mqttClientId', clientId);
+}
+
+/* Lịch sử chat lưu trên máy */
+var history = [];
+try{ history = JSON.parse(localStorage.getItem('mqttChatHistory') || '[]'); }catch(e){ history = []; }
+function saveHistory(){
+  try{ localStorage.setItem('mqttChatHistory', JSON.stringify(history.slice(-200))); }catch(e){}
+}
+
+function fmtTime(ts){
+  var d = new Date(ts);
+  return d.toLocaleTimeString('vi-VN',{hour:'2-digit',minute:'2-digit'}) + ' ' +
+         d.toLocaleDateString('vi-VN',{day:'2-digit',month:'2-digit'});
+}
+function renderMsg(item){
+  var h = document.getElementById('emptyHint'); if(h) h.remove();
+  var div = document.createElement('div');
+  div.className = 'msg ' + item.who;
+  div.textContent = item.text;
+  var m = document.createElement('div');
+  m.className = 'meta';
+  m.textContent = (item.who==='them' ? 'Muse · ' : item.who==='me' ? 'Bạn · ' : '') + fmtTime(item.ts);
+  div.appendChild(m);
+  msgsEl.appendChild(div);
+  msgsEl.scrollTop = msgsEl.scrollHeight;
+}
+function addMsg(text, who, save){
+  var item = { text: text, who: who, ts: Date.now() };
+  renderMsg(item);
+  if(save !== false && who !== 'sys'){ history.push(item); saveHistory(); }
+}
+function sys(text){ addMsg(text, 'sys', false); }
+
+history.forEach(renderMsg);
+if(history.length) sys('— Lịch sử chat đã lưu trên máy —');
+
+function showTips(){
+  if(gaveTips) return; gaveTips = true;
+  sys('⚠️ Chưa kết nối được. Thường do mạng đang dùng chặn cổng của broker. Cách xử lý:\n1) Tắt Wi-Fi, dùng 4G/5G rồi bấm "Kết nối lại"\n2) Hoặc mở app bằng Safari / Chrome bản mới nhất\n3) Kiểm tra điện thoại còn internet');
+}
+
+function connect(){
+  if(timer){ clearTimeout(timer); timer = null; }
+  if(client){ try{ client.end(true); }catch(e){} client = null; }
+  connected = false;
+  var url = CFG.endpoints[epIdx];
+  setStatus(false, 'Đang kết nối (đường ' + (epIdx+1) + '/' + CFG.endpoints.length + ')…', true);
+  client = mqtt.connect(url, {
+    clientId: clientId,
+    clean: false,           /* phiên bền: broker giữ phản hồi khi app tắt */
+    reconnectPeriod: 0,
+    connectTimeout: 12000,
+    keepalive: 60
+  });
+  timer = setTimeout(function(){
+    if(!connected){
+      if(epIdx < CFG.endpoints.length - 1){ epIdx++; connect(); }
+      else { setStatus(false, 'Không kết nối được — xem hướng dẫn bên dưới'); showTips(); }
+    }
+  }, 13000);
+  client.on('connect', function(){
+    if(timer){ clearTimeout(timer); timer = null; }
+    connected = true;
+    client.subscribe(CFG.topicReply, { qos: 1 });
+    setStatus(true, 'Đã kết nối · sẵn sàng nhắn tin');
+    sys('Đã kết nối tới broker ✓');
+  });
+  client.on('error', function(e){ /* bộ đếm giờ ở trên sẽ xử lý */ });
+  client.on('close', function(){
+    if(connected){
+      connected = false;
+      setStatus(false, 'Mất kết nối — đang tự nối lại…', true);
+      setTimeout(function(){ if(!connected) connect(); }, 3000);
+    }
+  });
+  client.on('message', function(topic, payload){
+    if(topic === CFG.topicReply){
+      addMsg(payload.toString(), 'them');
+      if(document.hidden){
+        unread++;
+        document.title = '🔴 (' + unread + ') phản hồi mới — ' + BASE_TITLE;
+        if(navigator.vibrate) navigator.vibrate(120);
+      }
+    }
+  });
+}
+document.addEventListener('visibilitychange', function(){
+  if(!document.hidden){ unread = 0; document.title = BASE_TITLE; }
+});
+document.getElementById('reconnect').onclick = function(){ epIdx = 0; gaveTips = false; connect(); };
+document.getElementById('clear').onclick = function(){
+  history = []; saveHistory();
+  msgsEl.innerHTML = '';
+  sys('Đã xoá lịch sử chat trên máy này.');
+};
+
+document.querySelectorAll('.chip').forEach(function(ch){
+  ch.onclick = function(){
+    document.querySelectorAll('.chip').forEach(function(c){ c.classList.remove('sel'); });
+    ch.classList.add('sel');
+    tag = ch.getAttribute('data-tag');
+    inp.focus();
+  };
+});
+
+function send(){
+  var text = inp.value.trim();
+  if(!text || !connected) return;
+  var payload = '[PHAN] ' + tag + ' | ' + text;
+  client.publish(CFG.topicSend, payload, { qos: 1 }, function(err){
+    if(err){ sys('⚠️ Gửi lỗi: ' + err.message); }
+  });
+  addMsg(text, 'me');
+  inp.value = '';
+  inp.focus();
+}
+sendBtn.onclick = send;
+inp.addEventListener('keydown', function(e){ if(e.key === 'Enter') send(); });
+
+connect();
+sys('Đã mở kênh MQTT riêng của bạn với Muse 🔒');
+}
+</script>
+</body>
+</html>
